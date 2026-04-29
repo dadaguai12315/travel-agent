@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Travel Advisor - 智能旅行推荐</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <h1>🌍 Travel Advisor</h1>
+    <span class="subtitle">智能旅行推荐助手</span>
+  </header>
+
+  <div class="chat-container" id="chatContainer">
+    <div class="welcome" id="welcome">
+      <div class="welcome-icon">✈️</div>
+      <h2>你好！想去哪里旅行？</h2>
+      <p>告诉我你的偏好——目的地类型、预算、季节、兴趣……我会帮你找到最合适的旅行方案。</p>
+      <div class="quick-prompts">
+        <button class="prompt-chip" data-prompt="推荐一个12月的海滩度假目的地，预算中等">🏖️ 冬季海滩度假</button>
+        <button class="prompt-chip" data-prompt="我预算有限，想去有文化底蕴的古城，3-4天">🏛️ 文化古城穷游</button>
+        <button class="prompt-chip" data-prompt="推荐适合蜜月的浪漫目的地，奢华体验">💑 蜜月浪漫之旅</button>
+        <button class="prompt-chip" data-prompt="我想带家人去自然风光好的地方，有哪些推荐？">🏔️ 家庭自然之旅</button>
+      </div>
+    </div>
+    <div class="messages" id="messages"></div>
+  </div>
+
+  <form class="input-bar" id="inputForm">
+    <input type="text" id="messageInput" placeholder="描述你的旅行偏好……" autocomplete="off" />
+    <button type="submit" id="sendBtn">发送</button>
+  </form>
+</div>
+
+<script src="/chat.js"></script>
+</body>
+</html>
