@@ -125,7 +125,8 @@
       <div v-if="currentView === 'chat'" class="content-area">
         <div class="messages">
           <template v-for="(item, idx) in messages" :key="idx">
-            <div class="message" :class="[item.role, { streaming: item.streaming }]">{{ item.content }}</div>
+            <div v-if="item.role === 'user'" class="message user">{{ item.content }}</div>
+            <div v-else class="message assistant md-content" :class="{ streaming: item.streaming }" v-html="renderMarkdown(item.content)"></div>
           </template>
           <div v-if="progressMsg" class="progress-indicator">
             <span class="progress-dot"></span>
@@ -144,6 +145,7 @@
 </div>
 
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/marked/marked.min.js"></script>
 <script src="/chat.js"></script>
 </body>
 </html>

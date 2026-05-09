@@ -48,6 +48,23 @@ createApp({
       return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
     }
 
+    // Markdown rendering (uses global `marked` from CDN)
+    function renderMarkdown(text) {
+      if (!text) return "";
+      if (typeof marked === "undefined") return escapeHtml(text);
+      try {
+        const html = marked.parse(text, { breaks: true, gfm: true });
+        return html;
+      } catch {
+        return escapeHtml(text);
+      }
+    }
+    function escapeHtml(str) {
+      const div = document.createElement("div");
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
     // ---- View state ----
     const currentView = ref("home");
     const activeMode = ref("free");
@@ -461,6 +478,7 @@ createApp({
       sendQuickPrompt,
       handleSend,
       formatTime,
+      renderMarkdown,
     };
   },
 }).mount("#app");
