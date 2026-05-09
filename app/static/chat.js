@@ -213,13 +213,14 @@ createApp({
           return;
         }
         const data = await resp.json();
+        console.log("switchConv loaded:", data.history?.length, "msgs for", sid.slice(0, 8));
         for (const msg of data.history) {
           messages.push({ role: msg.role, content: msg.content });
         }
         await nextTick();
         scrollToBottom();
-      } catch {
-        // Network error — stay in chat view with empty messages
+      } catch (err) {
+        console.error("Failed to load session:", err);
       }
     }
 

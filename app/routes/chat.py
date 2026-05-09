@@ -43,6 +43,9 @@ async def chat_stream(req: ChatRequest):
     session_id = req.session_id or memory.create_session()
     history = memory.get_history(session_id)
 
+    # Save user message immediately (before streaming starts)
+    memory.add_message(session_id, "user", req.message)
+
     async def event_stream():
         full_text = ""
         async for event in run(req.message, history):
@@ -52,9 +55,9 @@ async def chat_stream(req: ChatRequest):
                 full_text = event.get("full_text", full_text)
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-        # Save conversation after completion
-        memory.add_message(session_id, "user", req.message)
-        memory.add_message(session_id, "assistant", full_text)
+        # Save assistant response after streaming completes
+        if full_text:
+            memory.add_message(session_id, "assistant", full_text)
 
     return StreamingResponse(
         event_stream(),
