@@ -55,12 +55,8 @@ createApp({
     const conversations = reactive(loadConversations());
     const sidebarOpen = ref(false);
 
-    function toggleSidebar() {
-      sidebarOpen.value = !sidebarOpen.value;
-    }
-    function closeSidebar() {
-      sidebarOpen.value = false;
-    }
+    function toggleSidebar() { sidebarOpen.value = !sidebarOpen.value; }
+    function closeSidebar() { sidebarOpen.value = false; }
 
     // ---- Guided selection state ----
     const currentStep = ref(0);
@@ -143,12 +139,36 @@ createApp({
       { icon: "👨‍👩‍👧", label: "家庭自然之旅", desc: "带孩子感受大自然", text: "我想带家人去自然风光好的地方，有哪些推荐？" },
     ];
 
-    // ---- Chat state ----
+    // ---- Chat state (display layer — points to active session) ----
     const messages = reactive([]);
     const inputText = ref("");
     const isStreaming = ref(false);
     const progressMsg = ref(null);
-    let streamAbortController = null;
+
+    // Per-session storage for background streaming
+    const sessionStore = {}; // {sid: {messages: [], controller: AbortController|null}}
+    function getStore(sid) {
+      if (!sessionStore[sid]) {
+        sessionStore[sid] = { messages: [], controller: null };
+      }
+      return sessionStore[sid];
+    }
+    function stashSession() {
+      if (!activeSessionId.value) return;
+      const store = getStore(activeSessionId.value);
+      store.messages = messages.slice(); // shallow copy — shares message objects
+      store.controller = messages._controller || null;
+      store.isStreaming = isStreaming.value;
+    }
+    function unstashSession(sid) {
+      const store = getStore(sid);
+      messages.length = 0;
+      messages.push(...store.messages);
+      messages._controller = store.controller;
+      const alive = store.controller && !store.controller.signal.aborted;
+      isStreaming.value = alive;
+      progressMsg.value = null;
+    }
 
     const toolProgressMap = {
       search_destinations: "正在搜索目的地...",
@@ -166,11 +186,8 @@ createApp({
     }
 
     function goHome() {
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
-      // Save current conversation state before leaving
+      // Save current session state (keep stream running in background)
+      stashSession();
       if (activeSessionId.value) {
         updateConversation(activeSessionId.value, { msgCount: messages.length });
       }
@@ -180,6 +197,7 @@ createApp({
       messages.length = 0;
       activeMode.value = "free";
       resetGuided();
+      isStreaming.value = false;
       progressMsg.value = null;
     }
 
@@ -193,12 +211,11 @@ createApp({
     }
 
     async function switchConversation(sid) {
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
+      // Save current session (keep its stream running in background)
+      stashSession();
+      if (activeSessionId.value && activeSessionId.value !== sid) {
+        updateConversation(activeSessionId.value, { msgCount: getStore(activeSessionId.value).messages.length });
       }
-      isStreaming.value = false;
-      progressMsg.value = null;
 
       activeSessionId.value = sid;
       localStorage.setItem(ACTIVE_SESSION_KEY, sid);
@@ -206,25 +223,39 @@ createApp({
       currentView.value = "chat";
       closeSidebar();
 
+      // Restore from local store if available
+      const store = getStore(sid);
+      if (store.messages.length > 0) {
+        unstashSession(sid);
+        await nextTick();
+        scrollToBottom();
+        return;
+      }
+
+      // Fetch from API
       try {
         const resp = await fetch(`/api/sessions/${sid}`);
-        if (!resp.ok) {
-          // Session expired on server, still show empty chat
-          return;
-        }
-        const data = await resp.json();
-        console.log("switchConv loaded:", data.history?.length, "msgs for", sid.slice(0, 8));
-        for (const msg of data.history) {
-          messages.push({ role: msg.role, content: msg.content });
+        if (resp.ok) {
+          const data = await resp.json();
+          for (const msg of data.history) {
+            messages.push({ role: msg.role, content: msg.content });
+          }
+          store.messages = messages.slice();
         }
         await nextTick();
         scrollToBottom();
-      } catch (err) {
-        console.error("Failed to load session:", err);
+      } catch {
+        // Network error — stay in chat view with empty messages
       }
     }
 
     async function deleteConversation(sid) {
+      // Abort the stream for this session if running
+      const store = getStore(sid);
+      if (store.controller && !store.controller.signal.aborted) {
+        store.controller.abort();
+      }
+      delete sessionStore[sid];
       removeConversation(sid);
       fetch(`/api/sessions/${sid}`, { method: "DELETE" }).catch(() => {});
       if (activeSessionId.value === sid) {
@@ -244,13 +275,20 @@ createApp({
 
       inputText.value = "";
       const isNewSession = !activeSessionId.value;
+      // Capture the session this stream belongs to
+      const streamSid = activeSessionId.value;
 
       currentView.value = "chat";
       messages.push({ role: "user", content: text });
       scrollToBottom();
 
       isStreaming.value = true;
-      streamAbortController = new AbortController();
+      const controller = new AbortController();
+      messages._controller = controller;
+      // Save controller to session store so it survives switching
+      if (streamSid) {
+        getStore(streamSid).controller = controller;
+      }
 
       const assistantMsg = reactive({
         role: "assistant",
@@ -265,16 +303,18 @@ createApp({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: text,
-            session_id: activeSessionId.value || null,
+            session_id: streamSid || null,
           }),
-          signal: streamAbortController.signal,
+          signal: controller.signal,
         });
 
         const respSessionId = response.headers.get("X-Session-Id");
-        if (respSessionId && respSessionId !== activeSessionId.value) {
-          activeSessionId.value = respSessionId;
-          localStorage.setItem(ACTIVE_SESSION_KEY, respSessionId);
-          // Add to conversation list if new
+        if (respSessionId) {
+          // Always update the store for the real session ID
+          if (respSessionId !== activeSessionId.value) {
+            activeSessionId.value = respSessionId;
+            localStorage.setItem(ACTIVE_SESSION_KEY, respSessionId);
+          }
           if (isNewSession || !conversations.find(c => c.id === respSessionId)) {
             addConversation(respSessionId, text.slice(0, 30));
           }
@@ -297,36 +337,45 @@ createApp({
             const line = part.trim();
             if (!line.startsWith("data: ")) continue;
             let data;
-            try {
-              data = JSON.parse(line.slice(6));
-            } catch {
-              continue;
-            }
+            try { data = JSON.parse(line.slice(6)); } catch { continue; }
+
+            const isActive = activeSessionId.value === respSessionId;
 
             switch (data.type) {
               case "tool_call": {
-                progressMsg.value = toolProgressMap[data.name] || "正在查询...";
-                scrollToBottom();
+                if (isActive) {
+                  progressMsg.value = toolProgressMap[data.name] || "正在查询...";
+                  scrollToBottom();
+                }
                 break;
               }
               case "tool_result": {
-                progressMsg.value = null;
+                if (isActive) progressMsg.value = null;
                 break;
               }
               case "content": {
-                progressMsg.value = null;
+                if (isActive) progressMsg.value = null;
+                // Always update the shared assistantMsg object
+                // (it persists in sessionStore even when not active)
                 assistantMsg.content += data.content;
-                scrollToBottom();
+                if (isActive) scrollToBottom();
                 break;
               }
               case "done": {
                 assistantMsg.streaming = false;
-                // Update conversation metadata
-                if (activeSessionId.value) {
-                  updateConversation(activeSessionId.value, {
+                const realSid = respSessionId || activeSessionId.value;
+                if (realSid) {
+                  const store = getStore(realSid);
+                  store.messages = isActive ? messages.slice() : store.messages;
+                  store.isStreaming = false;
+                  updateConversation(realSid, {
                     title: text.slice(0, 30),
-                    msgCount: messages.length,
+                    msgCount: isActive ? messages.length : store.messages.length,
                   });
+                }
+                if (isActive) {
+                  isStreaming.value = false;
+                  progressMsg.value = null;
                 }
                 break;
               }
@@ -340,9 +389,16 @@ createApp({
           console.error("Stream error:", err);
         }
       } finally {
-        isStreaming.value = false;
-        progressMsg.value = null;
-        streamAbortController = null;
+        // Only update display state if this session is still active
+        if (activeSessionId.value === respSessionId) {
+          isStreaming.value = false;
+          progressMsg.value = null;
+        }
+        if (respSessionId) {
+          const store = getStore(respSessionId);
+          store.controller = null;
+          store.isStreaming = false;
+        }
       }
     }
 
@@ -363,6 +419,8 @@ createApp({
             for (const msg of data.history) {
               messages.push({ role: msg.role, content: msg.content });
             }
+            const store = getStore(activeSessionId.value);
+            store.messages = messages.slice();
             currentView.value = "chat";
             await nextTick();
             scrollToBottom();
@@ -370,7 +428,6 @@ createApp({
           }
         } catch { /* session expired or network error, show home */ }
       }
-      // No active session or failed to load — show home
       activeSessionId.value = null;
       localStorage.removeItem(ACTIVE_SESSION_KEY);
     });
