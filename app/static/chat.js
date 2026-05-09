@@ -1,10 +1,66 @@
-const { createApp, ref, reactive, nextTick, watch } = Vue;
+const { createApp, ref, reactive, nextTick, watch, onMounted } = Vue;
+
+const CONVERSATIONS_KEY = "travel_conversations";
+const ACTIVE_SESSION_KEY = "travel_active_session";
 
 createApp({
   setup() {
+    // ---- Persistent conversation list (localStorage) ----
+    function loadConversations() {
+      try {
+        return JSON.parse(localStorage.getItem(CONVERSATIONS_KEY) || "[]");
+      } catch { return []; }
+    }
+    function saveConversations() {
+      localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+    }
+    function addConversation(id, title) {
+      if (conversations.find(c => c.id === id)) return;
+      conversations.unshift({
+        id,
+        title: title || "新对话",
+        timestamp: Date.now(),
+        msgCount: 0,
+      });
+      saveConversations();
+    }
+    function updateConversation(id, updates) {
+      const conv = conversations.find(c => c.id === id);
+      if (!conv) return;
+      Object.assign(conv, updates);
+      conv.timestamp = Date.now();
+      saveConversations();
+    }
+    function removeConversation(id) {
+      const idx = conversations.findIndex(c => c.id === id);
+      if (idx >= 0) {
+        conversations.splice(idx, 1);
+        saveConversations();
+      }
+    }
+    function formatTime(ts) {
+      const d = new Date(ts);
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      if (isToday) return `${hh}:${mm}`;
+      return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+    }
+
     // ---- View state ----
-    const currentView = ref("home"); // "home" | "chat"
-    const activeMode = ref("free");   // "free" | "guided"
+    const currentView = ref("home");
+    const activeMode = ref("free");
+    const activeSessionId = ref(localStorage.getItem(ACTIVE_SESSION_KEY) || null);
+    const conversations = reactive(loadConversations());
+    const sidebarOpen = ref(false);
+
+    function toggleSidebar() {
+      sidebarOpen.value = !sidebarOpen.value;
+    }
+    function closeSidebar() {
+      sidebarOpen.value = false;
+    }
 
     // ---- Guided selection state ----
     const currentStep = ref(0);
@@ -56,7 +112,7 @@ createApp({
       if (currentStep.value === 0) canAdvance.value = !!selections.destination;
       else if (currentStep.value === 1)
         canAdvance.value = !!(selections.budget && selections.season);
-      else canAdvance.value = true; // step 2 is optional
+      else canAdvance.value = true;
     }
 
     function toggleVibe(val) {
@@ -81,30 +137,10 @@ createApp({
 
     // ---- Quick prompts ----
     const quickPrompts = [
-      {
-        icon: "🏖️",
-        label: "冬季海滩度假",
-        desc: "12月出发，预算中等",
-        text: "推荐一个12月的海滩度假目的地，预算中等",
-      },
-      {
-        icon: "🏛️",
-        label: "文化古城穷游",
-        desc: "预算有限，3-4天深度游",
-        text: "我预算有限，想去有文化底蕴的古城，3-4天",
-      },
-      {
-        icon: "💑",
-        label: "蜜月浪漫之旅",
-        desc: "奢华体验，难忘回忆",
-        text: "推荐适合蜜月的浪漫目的地，奢华体验",
-      },
-      {
-        icon: "👨‍👩‍👧",
-        label: "家庭自然之旅",
-        desc: "带孩子感受大自然",
-        text: "我想带家人去自然风光好的地方，有哪些推荐？",
-      },
+      { icon: "🏖️", label: "冬季海滩度假", desc: "12月出发，预算中等", text: "推荐一个12月的海滩度假目的地，预算中等" },
+      { icon: "🏛️", label: "文化古城穷游", desc: "预算有限，3-4天深度游", text: "我预算有限，想去有文化底蕴的古城，3-4天" },
+      { icon: "💑", label: "蜜月浪漫之旅", desc: "奢华体验，难忘回忆", text: "推荐适合蜜月的浪漫目的地，奢华体验" },
+      { icon: "👨‍👩‍👧", label: "家庭自然之旅", desc: "带孩子感受大自然", text: "我想带家人去自然风光好的地方，有哪些推荐？" },
     ];
 
     // ---- Chat state ----
@@ -112,8 +148,6 @@ createApp({
     const inputText = ref("");
     const isStreaming = ref(false);
     const progressMsg = ref(null);
-
-    let sessionId = sessionStorage.getItem("travel_session_id") || null;
     let streamAbortController = null;
 
     const toolProgressMap = {
@@ -136,6 +170,12 @@ createApp({
         streamAbortController.abort();
         streamAbortController = null;
       }
+      // Save current conversation state before leaving
+      if (activeSessionId.value) {
+        updateConversation(activeSessionId.value, { msgCount: messages.length });
+      }
+      activeSessionId.value = null;
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
       currentView.value = "home";
       messages.length = 0;
       activeMode.value = "free";
@@ -152,6 +192,45 @@ createApp({
       canAdvance.value = false;
     }
 
+    async function switchConversation(sid) {
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+      isStreaming.value = false;
+      progressMsg.value = null;
+
+      activeSessionId.value = sid;
+      localStorage.setItem(ACTIVE_SESSION_KEY, sid);
+      messages.length = 0;
+      currentView.value = "chat";
+      closeSidebar();
+
+      try {
+        const resp = await fetch(`/api/sessions/${sid}`);
+        if (!resp.ok) {
+          // Session expired on server, still show empty chat
+          return;
+        }
+        const data = await resp.json();
+        for (const msg of data.history) {
+          messages.push({ role: msg.role, content: msg.content });
+        }
+        await nextTick();
+        scrollToBottom();
+      } catch {
+        // Network error — stay in chat view with empty messages
+      }
+    }
+
+    async function deleteConversation(sid) {
+      removeConversation(sid);
+      fetch(`/api/sessions/${sid}`, { method: "DELETE" }).catch(() => {});
+      if (activeSessionId.value === sid) {
+        goHome();
+      }
+    }
+
     function sendQuickPrompt(text) {
       if (isStreaming.value) return;
       inputText.value = text;
@@ -163,6 +242,8 @@ createApp({
       if (!text || isStreaming.value) return;
 
       inputText.value = "";
+      const isNewSession = !activeSessionId.value;
+
       currentView.value = "chat";
       messages.push({ role: "user", content: text });
       scrollToBottom();
@@ -181,14 +262,21 @@ createApp({
         const response = await fetch("/api/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, session_id: sessionId }),
+          body: JSON.stringify({
+            message: text,
+            session_id: activeSessionId.value || null,
+          }),
           signal: streamAbortController.signal,
         });
 
         const respSessionId = response.headers.get("X-Session-Id");
-        if (respSessionId) {
-          sessionId = respSessionId;
-          sessionStorage.setItem("travel_session_id", sessionId);
+        if (respSessionId && respSessionId !== activeSessionId.value) {
+          activeSessionId.value = respSessionId;
+          localStorage.setItem(ACTIVE_SESSION_KEY, respSessionId);
+          // Add to conversation list if new
+          if (isNewSession || !conversations.find(c => c.id === respSessionId)) {
+            addConversation(respSessionId, text.slice(0, 30));
+          }
         }
 
         if (!response.body) throw new Error("No response body");
@@ -232,6 +320,13 @@ createApp({
               }
               case "done": {
                 assistantMsg.streaming = false;
+                // Update conversation metadata
+                if (activeSessionId.value) {
+                  updateConversation(activeSessionId.value, {
+                    title: text.slice(0, 30),
+                    msgCount: messages.length,
+                  });
+                }
                 break;
               }
             }
@@ -257,9 +352,36 @@ createApp({
       () => checkCanAdvance()
     );
 
+    // Restore active session on mount
+    onMounted(async () => {
+      if (activeSessionId.value) {
+        try {
+          const resp = await fetch(`/api/sessions/${activeSessionId.value}`);
+          if (resp.ok) {
+            const data = await resp.json();
+            for (const msg of data.history) {
+              messages.push({ role: msg.role, content: msg.content });
+            }
+            currentView.value = "chat";
+            await nextTick();
+            scrollToBottom();
+            return;
+          }
+        } catch { /* session expired or network error, show home */ }
+      }
+      // No active session or failed to load — show home
+      activeSessionId.value = null;
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+    });
+
     return {
       currentView,
       activeMode,
+      activeSessionId,
+      conversations,
+      sidebarOpen,
+      toggleSidebar,
+      closeSidebar,
       currentStep,
       selections,
       destinationTypes,
@@ -276,8 +398,11 @@ createApp({
       isStreaming,
       progressMsg,
       goHome,
+      switchConversation,
+      deleteConversation,
       sendQuickPrompt,
       handleSend,
+      formatTime,
     };
   },
 }).mount("#app");

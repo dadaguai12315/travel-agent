@@ -1,7 +1,7 @@
 import json
 
-from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.agent.agent import run
@@ -13,6 +13,29 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+
+
+@router.get("/api/sessions")
+async def list_sessions():
+    """Return all active sessions with metadata."""
+    return JSONResponse(memory.list_sessions())
+
+
+@router.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Return session with full history."""
+    session = memory.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse(session)
+
+
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session."""
+    if not memory.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse({"ok": True})
 
 
 @router.post("/api/chat/stream")

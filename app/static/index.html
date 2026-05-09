@@ -2,194 +2,144 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Travel Advisor</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌍</text></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div id="app">
-  <div class="app">
-    <!-- Header -->
-    <header class="header">
-      <h1>🌍 Travel Advisor</h1>
-      <button
-        v-if="currentView === 'chat'"
-        class="header-btn"
-        @click="goHome"
-      >+ 新对话</button>
-      <span v-else class="header-btn" style="border:none;cursor:default;">智能旅行助手</span>
-    </header>
+  <div class="app-layout" :class="{ 'sidebar-open': sidebarOpen }">
+    <!-- Sidebar Overlay (mobile) -->
+    <div class="sidebar-overlay" v-if="sidebarOpen" @click="closeSidebar"></div>
 
-    <!-- Home View -->
-    <div v-if="currentView === 'home'" class="content-area">
-      <!-- Hero -->
-      <div class="hero">
-        <div class="hero-icon">🌍</div>
-        <h2>发现你的完美旅行</h2>
-        <p>智能推荐，一步到位</p>
+    <!-- Sidebar -->
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
+      <div class="sidebar-header">
+        <span>对话历史</span>
       </div>
-
-      <!-- Tab Switch -->
-      <div class="tab-switch">
-        <button
-          class="tab"
-          :class="{ active: activeMode === 'free' }"
-          @click="activeMode = 'free'"
-        >✏️ 自由输入</button>
-        <button
-          class="tab"
-          :class="{ active: activeMode === 'guided' }"
-          @click="activeMode = 'guided'"
-        >🎯 快速选择</button>
-      </div>
-
-      <!-- Free Input Mode -->
-      <div v-if="activeMode === 'free'">
-        <div class="quick-prompts">
-          <button
-            v-for="p in quickPrompts"
-            :key="p.label"
-            class="prompt-card"
-            @click="sendQuickPrompt(p.text)"
-          >
-            <span class="prompt-icon">{{ p.icon }}</span>
-            <span>
-              <div class="prompt-text">{{ p.label }}</div>
-              <div class="prompt-desc">{{ p.desc }}</div>
-            </span>
-          </button>
+      <div class="sidebar-list">
+        <div
+          v-for="conv in conversations"
+          :key="conv.id"
+          class="sidebar-item"
+          :class="{ active: activeSessionId === conv.id }"
+          @click="switchConversation(conv.id)"
+        >
+          <div class="sidebar-item-main">
+            <div class="sidebar-item-title">{{ conv.title }}</div>
+            <div class="sidebar-item-meta">{{ conv.msgCount }} 条消息 · {{ formatTime(conv.timestamp) }}</div>
+          </div>
+          <button class="sidebar-item-delete" @click.stop="deleteConversation(conv.id)" title="删除对话">×</button>
         </div>
-        <form class="input-bar" @submit.prevent="handleSend">
-          <input
-            type="text"
-            v-model="inputText"
-            placeholder="描述你的旅行偏好..."
-            autocomplete="off"
-            :disabled="isStreaming"
-          />
-          <button type="submit" :disabled="isStreaming || !inputText.trim()">发送</button>
-        </form>
+        <div v-if="conversations.length === 0" class="sidebar-empty">暂无历史对话</div>
+      </div>
+      <button class="sidebar-new-btn" @click="goHome(); closeSidebar()">+ 新对话</button>
+    </aside>
+
+    <!-- Main Content -->
+    <div class="app-main">
+      <!-- Header -->
+      <header class="header">
+        <button class="hamburger" @click="toggleSidebar" aria-label="菜单">
+          <span></span><span></span><span></span>
+        </button>
+        <h1>🌍 Travel Advisor</h1>
+        <div class="header-right">
+          <button
+            v-if="currentView === 'chat'"
+            class="header-btn"
+            @click="goHome"
+          >+ 新对话</button>
+          <span v-else class="header-btn" style="border:none;cursor:default;">智能旅行助手</span>
+        </div>
+      </header>
+
+      <!-- Home View -->
+      <div v-if="currentView === 'home'" class="content-area">
+        <div class="hero">
+          <div class="hero-icon">🌍</div>
+          <h2>发现你的完美旅行</h2>
+          <p>智能推荐，一步到位</p>
+        </div>
+
+        <div class="tab-switch">
+          <button class="tab" :class="{ active: activeMode === 'free' }" @click="activeMode = 'free'">✏️ 自由输入</button>
+          <button class="tab" :class="{ active: activeMode === 'guided' }" @click="activeMode = 'guided'">🎯 快速选择</button>
+        </div>
+
+        <!-- Free Input Mode -->
+        <div v-if="activeMode === 'free'">
+          <div class="quick-prompts">
+            <button v-for="p in quickPrompts" :key="p.label" class="prompt-card" @click="sendQuickPrompt(p.text)">
+              <span class="prompt-icon">{{ p.icon }}</span>
+              <span>
+                <div class="prompt-text">{{ p.label }}</div>
+                <div class="prompt-desc">{{ p.desc }}</div>
+              </span>
+            </button>
+          </div>
+          <form class="input-bar" @submit.prevent="handleSend">
+            <input type="text" v-model="inputText" placeholder="描述你的旅行偏好..." autocomplete="off" :disabled="isStreaming" />
+            <button type="submit" :disabled="isStreaming || !inputText.trim()">发送</button>
+          </form>
+        </div>
+
+        <!-- Guided Selection Mode -->
+        <div v-if="activeMode === 'guided'" style="display:flex;flex-direction:column;flex:1;">
+          <div class="step-indicator">
+            <template v-for="(s, idx) in guidedSteps" :key="idx">
+              <span class="step-dot" :class="{ done: idx < currentStep, current: idx === currentStep, pending: idx > currentStep }">{{ idx < currentStep ? '✓' : idx + 1 }}</span>
+              <span v-if="idx < guidedSteps.length - 1" class="step-line" :class="{ done: idx < currentStep }"></span>
+            </template>
+          </div>
+          <div class="step-question">{{ guidedSteps[currentStep]?.question }}</div>
+          <div v-if="currentStep === 0" class="option-grid">
+            <div v-for="opt in destinationTypes" :key="opt.value" class="option-card" :class="{ selected: selections.destination === opt.value }" @click="selections.destination = opt.value">
+              <div class="option-icon">{{ opt.icon }}</div>
+              <div>{{ opt.label }}</div>
+            </div>
+          </div>
+          <div v-if="currentStep === 1">
+            <div style="font-size:0.78rem;color:var(--c-text-secondary);text-align:center;margin-bottom:10px;">预算</div>
+            <div class="option-chips">
+              <span v-for="opt in budgetOptions" :key="opt.value" class="chip" :class="{ selected: selections.budget === opt.value }" @click="selections.budget = opt.value">{{ opt.label }}</span>
+            </div>
+            <div style="font-size:0.78rem;color:var(--c-text-secondary);text-align:center;margin-bottom:10px;">季节</div>
+            <div class="option-chips">
+              <span v-for="opt in seasonOptions" :key="opt.value" class="chip" :class="{ selected: selections.season === opt.value }" @click="selections.season = opt.value">{{ opt.label }}</span>
+            </div>
+          </div>
+          <div v-if="currentStep === 2" class="option-chips" style="margin-top:8px;">
+            <span v-for="opt in vibeOptions" :key="opt.value" class="chip" :class="{ selected: selections.vibe.includes(opt.value) }" @click="toggleVibe(opt.value)">{{ opt.label }}</span>
+          </div>
+          <div class="step-nav">
+            <button v-if="currentStep > 0" class="btn-back" @click="currentStep--">上一步</button>
+            <button v-if="currentStep < 2" class="btn-next" :disabled="!canAdvance" @click="currentStep++">下一步</button>
+            <button v-if="currentStep === 2" class="btn-next go" @click="submitGuided">✈️ 开始推荐</button>
+          </div>
+        </div>
       </div>
 
-      <!-- Guided Selection Mode -->
-      <div v-if="activeMode === 'guided'" style="display:flex;flex-direction:column;flex:1;">
-        <!-- Step Indicator -->
-        <div class="step-indicator">
-          <template v-for="(s, idx) in guidedSteps" :key="idx">
-            <span
-              class="step-dot"
-              :class="{
-                done: idx < currentStep,
-                current: idx === currentStep,
-                pending: idx > currentStep
-              }"
-            >{{ idx < currentStep ? '✓' : idx + 1 }}</span>
-            <span v-if="idx < guidedSteps.length - 1" class="step-line" :class="{ done: idx < currentStep }"></span>
+      <!-- Chat View -->
+      <div v-if="currentView === 'chat'" class="content-area">
+        <div class="messages">
+          <template v-for="(item, idx) in messages" :key="idx">
+            <div class="message" :class="[item.role, { streaming: item.streaming }]">{{ item.content }}</div>
           </template>
-        </div>
-
-        <!-- Step Content -->
-        <div class="step-question">{{ guidedSteps[currentStep]?.question }}</div>
-
-        <!-- Step 0: Destination Type (grid) -->
-        <div v-if="currentStep === 0" class="option-grid">
-          <div
-            v-for="opt in destinationTypes"
-            :key="opt.value"
-            class="option-card"
-            :class="{ selected: selections.destination === opt.value }"
-            @click="selections.destination = opt.value"
-          >
-            <div class="option-icon">{{ opt.icon }}</div>
-            <div>{{ opt.label }}</div>
+          <div v-if="progressMsg" class="progress-indicator">
+            <span class="progress-dot"></span>
+            {{ progressMsg }}
           </div>
-        </div>
-
-        <!-- Step 1: Budget & Season -->
-        <div v-if="currentStep === 1">
-          <div style="font-size:0.78rem;color:var(--c-text-secondary);text-align:center;margin-bottom:10px;">预算</div>
-          <div class="option-chips">
-            <span
-              v-for="opt in budgetOptions"
-              :key="opt.value"
-              class="chip"
-              :class="{ selected: selections.budget === opt.value }"
-              @click="selections.budget = opt.value"
-            >{{ opt.label }}</span>
-          </div>
-          <div style="font-size:0.78rem;color:var(--c-text-secondary);text-align:center;margin-bottom:10px;">季节</div>
-          <div class="option-chips">
-            <span
-              v-for="opt in seasonOptions"
-              :key="opt.value"
-              class="chip"
-              :class="{ selected: selections.season === opt.value }"
-              @click="selections.season = opt.value"
-            >{{ opt.label }}</span>
-          </div>
-        </div>
-
-        <!-- Step 2: Travel Vibe -->
-        <div v-if="currentStep === 2" class="option-chips" style="margin-top:8px;">
-          <span
-            v-for="opt in vibeOptions"
-            :key="opt.value"
-            class="chip"
-            :class="{ selected: selections.vibe.includes(opt.value) }"
-            @click="toggleVibe(opt.value)"
-          >{{ opt.label }}</span>
-        </div>
-
-        <!-- Step Nav -->
-        <div class="step-nav">
-          <button
-            v-if="currentStep > 0"
-            class="btn-back"
-            @click="currentStep--"
-          >上一步</button>
-          <button
-            v-if="currentStep < 2"
-            class="btn-next"
-            :disabled="!canAdvance"
-            @click="currentStep++"
-          >下一步</button>
-          <button
-            v-if="currentStep === 2"
-            class="btn-next go"
-            @click="submitGuided"
-          >✈️ 开始推荐</button>
         </div>
       </div>
-    </div>
 
-    <!-- Chat View -->
-    <div v-if="currentView === 'chat'" class="content-area">
-      <div class="messages">
-        <template v-for="(item, idx) in messages" :key="idx">
-          <div
-            class="message"
-            :class="[item.role, { streaming: item.streaming }]"
-          >{{ item.content }}</div>
-        </template>
-        <div v-if="progressMsg" class="progress-indicator">
-          <span class="progress-dot"></span>
-          {{ progressMsg }}
-        </div>
-      </div>
+      <!-- Input bar (chat view) -->
+      <form v-if="currentView === 'chat'" class="input-bar" @submit.prevent="handleSend">
+        <input type="text" v-model="inputText" placeholder="继续提问..." autocomplete="off" :disabled="isStreaming" />
+        <button type="submit" :disabled="isStreaming || !inputText.trim()">发送</button>
+      </form>
     </div>
-
-    <!-- Input bar (chat view only) -->
-    <form v-if="currentView === 'chat'" class="input-bar" @submit.prevent="handleSend">
-      <input
-        type="text"
-        v-model="inputText"
-        placeholder="继续提问..."
-        autocomplete="off"
-        :disabled="isStreaming"
-      />
-      <button type="submit" :disabled="isStreaming || !inputText.trim()">发送</button>
-    </form>
   </div>
 </div>
 
