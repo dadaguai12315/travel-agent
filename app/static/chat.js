@@ -1,4 +1,4 @@
-const { createApp, ref, reactive, nextTick } = Vue;
+const { createApp, ref, reactive, nextTick, watch } = Vue;
 
 createApp({
   setup() {
@@ -114,6 +114,7 @@ createApp({
     const progressMsg = ref(null);
 
     let sessionId = sessionStorage.getItem("travel_session_id") || null;
+    let streamAbortController = null;
 
     const toolProgressMap = {
       search_destinations: "正在搜索目的地...",
@@ -131,6 +132,10 @@ createApp({
     }
 
     function goHome() {
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
       currentView.value = "home";
       messages.length = 0;
       activeMode.value = "free";
@@ -148,6 +153,7 @@ createApp({
     }
 
     function sendQuickPrompt(text) {
+      if (isStreaming.value) return;
       inputText.value = text;
       handleSend();
     }
@@ -162,6 +168,7 @@ createApp({
       scrollToBottom();
 
       isStreaming.value = true;
+      streamAbortController = new AbortController();
 
       const assistantMsg = reactive({
         role: "assistant",
@@ -175,6 +182,7 @@ createApp({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text, session_id: sessionId }),
+          signal: streamAbortController.signal,
         });
 
         const respSessionId = response.headers.get("X-Session-Id");
@@ -183,6 +191,7 @@ createApp({
           sessionStorage.setItem("travel_session_id", sessionId);
         }
 
+        if (!response.body) throw new Error("No response body");
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -198,7 +207,12 @@ createApp({
           for (const part of parts) {
             const line = part.trim();
             if (!line.startsWith("data: ")) continue;
-            const data = JSON.parse(line.slice(6));
+            let data;
+            try {
+              data = JSON.parse(line.slice(6));
+            } catch {
+              continue;
+            }
 
             switch (data.type) {
               case "tool_call": {
@@ -224,22 +238,23 @@ createApp({
           }
         }
       } catch (err) {
-        assistantMsg.content = "抱歉，连接出错了。请重试。";
-        assistantMsg.streaming = false;
-        console.error("Stream error:", err);
+        if (err.name !== "AbortError") {
+          assistantMsg.content = "抱歉，连接出错了。请重试。";
+          assistantMsg.streaming = false;
+          console.error("Stream error:", err);
+        }
       } finally {
         isStreaming.value = false;
         progressMsg.value = null;
+        streamAbortController = null;
       }
     }
 
     // Watch step changes and validate
-    const { watch } = Vue;
     watch(currentStep, () => checkCanAdvance());
     watch(
       () => [selections.destination, selections.budget, selections.season],
-      () => checkCanAdvance(),
-      { deep: true }
+      () => checkCanAdvance()
     );
 
     return {
