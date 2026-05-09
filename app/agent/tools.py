@@ -1,179 +1,81 @@
 import json
 
-from app.data.destinations import search_destinations
-from app.data.hotels import get_hotels
-from app.data.attractions import get_attractions
-from app.data.weather import get_weather as get_weather_data
+from tavily import TavilyClient
+
+from app.config import settings
+
+_client = TavilyClient(api_key=settings.tavily_api_key) if settings.tavily_api_key else None
 
 TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_destinations",
-            "description": "根据用户偏好搜索匹配的旅行目的地。根据关键词、兴趣和预算筛选目的地。",
+            "name": "web_search",
+            "description": (
+                "在互联网上搜索最新、真实的旅行相关信息。"
+                "当需要获取实时数据（天气、价格、签证政策、活动）或补充目的地细节时使用。"
+                "可以同时搜索多个查询词条以提高效率。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词，如 '海滩 亚洲'、'文化古城'、'蜜月'",
-                    },
-                    "interests": {
+                    "queries": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "兴趣偏好列表，如 ['海滩', '美食', '文化', '冒险', '自然', '购物']",
-                    },
-                    "budget_level": {
-                        "type": "string",
-                        "enum": ["经济", "中等", "奢华"],
-                        "description": "预算等级",
+                        "description": (
+                            "搜索查询词条列表。每条查询应具体明确，用中文。"
+                            "示例：['巴厘岛 12月 天气 气温', '巴厘岛 蜜月酒店 价格 2025', "
+                            "'中国公民 印尼 最新免签政策']"
+                        ),
                     },
                 },
-                "required": ["query"],
+                "required": ["queries"],
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_hotels",
-            "description": "获取指定目的地的酒店住宿推荐。返回酒店名称、价格、评分和设施信息。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "destination": {
-                        "type": "string",
-                        "description": "目的地名称，如 '普吉岛'、'东京'",
-                    },
-                    "budget_level": {
-                        "type": "string",
-                        "enum": ["经济", "中等", "奢华"],
-                        "description": "预算等级",
-                    },
-                    "min_rating": {
-                        "type": "number",
-                        "description": "最低评分 (1.0-5.0)",
-                    },
-                },
-                "required": ["destination"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_attractions",
-            "description": "获取指定目的地的景点和活动推荐。返回景点名称、类别、花费、时长和评分。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "destination": {
-                        "type": "string",
-                        "description": "目的地名称",
-                    },
-                    "categories": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": ["自然", "文化", "美食", "冒险", "购物"],
-                        },
-                        "description": "活动类别列表",
-                    },
-                },
-                "required": ["destination"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "获取指定目的地和月份的天气信息。返回气温、湿度、降雨量和天气状况。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "destination": {
-                        "type": "string",
-                        "description": "目的地名称",
-                    },
-                    "month": {
-                        "type": "string",
-                        "description": "月份，如 '1月'、'6月'、'December'",
-                    },
-                },
-                "required": ["destination", "month"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_travel_tips",
-            "description": "获取旅行实用信息，包括签证要求、货币、语言和旅行建议。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "destination": {
-                        "type": "string",
-                        "description": "目的地名称",
-                    },
-                    "season": {
-                        "type": "string",
-                        "description": "旅行季节/月份，如 '12月'、'夏季'",
-                    },
-                },
-                "required": ["destination"],
-            },
-        },
-    },
-]
+] if _client else []
 
 
-def _get_travel_tips(destination: str, season: str | None = None) -> dict:
-    """Get travel tips for a destination."""
-    results = search_destinations(query=destination)
-    if not results:
-        return {"error": f"未找到 '{destination}' 的相关信息"}
+def search_enabled() -> bool:
+    """Check if web search is available."""
+    return _client is not None
 
-    dest = results[0]
-    tips = {
-        "destination": dest["name"],
-        "country": dest["country"],
-        "language": dest["language"],
-        "currency": dest["currency"],
-        "visa_info": dest["visa_info"],
-        "avg_daily_cost_usd": dest["avg_daily_cost_usd"],
-        "best_seasons": dest["best_seasons"],
-        "tips": [],
-    }
 
-    if dest["currency"] != "CNY":
-        tips["tips"].append(f"当地使用{dest['currency']}，建议提前换汇或使用国际信用卡")
-    if "落地签" in dest["visa_info"]:
-        tips["tips"].append("落地签请准备好护照、照片和入境卡")
-    elif "免签" in dest["visa_info"]:
-        tips["tips"].append("免签入境，请确保护照有效期超过6个月")
-    elif "签证" in dest["visa_info"]:
-        tips["tips"].append("需要提前办理签证，建议至少提前1个月准备")
-    if dest["avg_daily_cost_usd"] > 150:
-        tips["tips"].append("该目的地消费较高，建议做好预算规划")
-    else:
-        tips["tips"].append(f"日均消费约{int(dest['avg_daily_cost_usd'])}美金，性价比不错")
+def execute_web_search(queries: list[str]) -> list[dict]:
+    """Execute multiple web search queries and return merged results."""
+    if not _client:
+        return [{"error": "搜索服务未配置（缺少 TAVILY_API_KEY）"}]
 
-    if season:
-        weather = get_weather_data(destination, season)
-        if weather:
-            tips["weather_note"] = weather["travel_advice"]
+    all_results = []
+    for q in queries:
+        try:
+            response = _client.search(
+                query=q,
+                search_depth="basic",
+                max_results=3,
+                include_answer=True,
+            )
+            result = {
+                "query": q,
+                "answer": response.get("answer", ""),
+                "results": [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "content": r.get("content", ""),
+                    }
+                    for r in response.get("results", [])
+                ],
+            }
+            all_results.append(result)
+        except Exception as e:
+            all_results.append({"query": q, "error": str(e)})
 
-    return tips
+    return all_results
 
 
 TOOL_EXECUTORS = {
-    "search_destinations": lambda **kwargs: search_destinations(**kwargs),
-    "get_hotels": lambda **kwargs: get_hotels(**kwargs),
-    "get_attractions": lambda **kwargs: get_attractions(**kwargs),
-    "get_weather": lambda **kwargs: get_weather_data(**kwargs),
-    "get_travel_tips": lambda **kwargs: _get_travel_tips(**kwargs),
+    "web_search": lambda **kwargs: execute_web_search(**kwargs),
 }
 
 

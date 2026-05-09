@@ -3,59 +3,93 @@ from collections.abc import AsyncIterator
 
 from app.config import settings
 from app.llm.client import chat_completion, chat_completion_stream
-from app.agent.tools import TOOL_SCHEMAS, execute_tool
+from app.agent.tools import TOOL_SCHEMAS, execute_tool, search_enabled
 
-SYSTEM_PROMPT = """你是一个专业的旅行顾问助手。你的任务是根据用户的偏好为他们推荐旅行目的地和行程建议。
+SYSTEM_PROMPT = """你是一个专业的旅行规划顾问。你的目标是为用户制定详细、实用、个性化的旅行计划。
 
-## 工作原则
-1. **先收集数据再推荐**：在给出任何推荐之前，先使用工具查询具体数据。
-2. **多维对比**：如果用户犹豫不决，可以查询多个目的地进行对比分析。
-3. **诚实告知**：如果工具返回空结果，诚实地告诉用户并建议扩大搜索范围。
-4. **结构化呈现**：用清晰的结构展示信息，包括费用估算、最佳季节和实用贴士。
-5. **预算意识**：始终关注用户的预算偏好并给出匹配的推荐。
-6. **个性化**：根据用户的兴趣标签（海滩/文化/美食/冒险/自然/购物）定制推荐。
+## 工作方式
 
-## 回复格式
-- 先用简洁的语言总结推荐方案
-- 再用结构化方式列出每个推荐目的地的详细信息
-- 最后提供实用建议（签证、货币、交通等）
+你采用**先研究、后规划**的两阶段工作法：
 
-## 注意
-- 永远不要编造酒店名称、价格或天气数据——请使用工具查询。
-- 如果用户没有指定预算，默认假设为中等预算。
-- 中国用户不需要签证的目的地可以优先推荐。"""
+### 第一阶段：信息收集
+当用户提出旅行需求时，先用 `web_search` 工具搜索最新的相关信息：
+- 目的地概况、最佳旅行季节、当地特色
+- 当前天气、住宿价格区间、热门景点
+- 签证政策、货币汇率、交通方式
+- 当地节日活动、美食推荐、安全提示
+
+根据用户的具体需求调整搜索关键词。例如用户关注预算，就侧重搜索价格信息；用户喜欢美食，就搜索当地餐厅和夜市。
+
+### 第二阶段：规划输出
+收集到足够信息后，为用户生成一份结构化的旅行计划：
+
+1. **目的地推荐** — 1-2句话说明为什么选这个目的地
+2. **最佳出行时间** — 结合天气和季节
+3. **每日行程** — 按天列出具体行程（上午/下午/晚上），附地点名称和简要说明
+4. **预算估算** — 机票、住宿、餐饮、门票、交通的大致费用
+5. **实用贴士** — 签证、货币、语言、交通、安全注意事项
+
+## 重要原则
+
+- **必须使用 web_search 获取最新信息**，不要仅凭训练数据。搜索查询用中文，每条查询具体明确。
+- **一次搜索多个相关查询**（2-4个），提高效率。
+- **支持对比**：如果用户没有明确目的地，搜索2-3个候选地做对比。
+- **诚实透明**：如果搜索没找到某类信息，告知用户并给出基于常识的建议。
+- **个性化**：始终围绕用户的预算、季节、兴趣偏好来规划。
+- **预算敏感**：根据用户的预算等级推荐匹配的住宿和活动。
+- **中国护照优先**：优先考虑中国公民免签或落地签的目的地。
+
+## 输出风格
+
+- 用自然、热情但不啰嗦的语言
+- 避免冗长的表格，用清晰的条目式呈现
+- 行程部分要具体，包含真实的地名和活动名称
+- 费用用人民币（CNY）标注
+- 如果用户后来追问或想调整，灵活修改计划"""
+
+SYSTEM_PROMPT_NO_SEARCH = """你是一个专业的旅行规划顾问。你的目标是为用户制定详细、实用、个性化的旅行计划。
+
+由于当前未配置网络搜索功能，请直接基于你的知识库为用户规划旅行。
+
+## 输出格式
+
+1. **目的地推荐** — 1-2句话说明为什么选这个目的地
+2. **最佳出行时间** — 结合季节特点
+3. **每日行程** — 按天列出具体行程（上午/下午/晚上），附推荐地点和简要说明
+4. **预算估算** — 机票、住宿、餐饮、门票、交通的大致费用（人民币）
+5. **实用贴士** — 签证、货币、语言、交通、安全注意事项
+
+## 重要原则
+
+- **个性化**：始终围绕用户的预算、季节、兴趣偏好来规划。
+- **诚实透明**：对于不确定的实时信息（如具体价格、最新签证政策），请提醒用户自行核实。
+- **中国护照优先**：优先考虑中国公民免签或落地签的目的地。
+- 如果用户后来追问或想调整，灵活修改计划。"""
 
 
 async def run(
     user_message: str,
     history: list[dict],
 ) -> AsyncIterator[dict]:
-    """
-    Agent loop: tool-calling rounds (non-streaming) + final response (streaming).
+    has_search = search_enabled()
+    prompt = SYSTEM_PROMPT if has_search else SYSTEM_PROMPT_NO_SEARCH
+    tools = TOOL_SCHEMAS if has_search else None
 
-    Yields SSE event dicts:
-      {"type": "tool_call", "name": str, "args": dict}
-      {"type": "tool_result", "name": str, "result_preview": str}
-      {"type": "content", "content": str}
-      {"type": "done"}
-    """
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *history[-20:],  # Keep last 20 messages
+        {"role": "system", "content": prompt},
+        *history[-20:],
         {"role": "user", "content": user_message},
     ]
 
-    # ---- Tool-calling loop (non-streaming) ----
-    for round_num in range(settings.max_tool_rounds):
-        response = await chat_completion(messages, tools=TOOL_SCHEMAS)
+    # ---- Tool-calling loop (non-streaming, only when search is enabled) ----
+    for _ in range(settings.max_tool_rounds if has_search else 0):
+        response = await chat_completion(messages, tools=tools)
 
         tool_calls = response.get("tool_calls") or []
         if not tool_calls:
-            # No tool calls → append assistant message and break
             messages.append(response)
             break
 
-        # Append assistant message with tool calls
         messages.append(response)
 
         for tc in tool_calls:
@@ -63,25 +97,22 @@ async def run(
             tool_name = func.get("name", "")
             tool_args = json.loads(func.get("arguments", "{}"))
 
-            # Notify frontend: tool call started
             yield {
                 "type": "tool_call",
                 "name": tool_name,
                 "args": tool_args,
             }
 
-            # Execute tool
             result_str = execute_tool(tool_name, tool_args)
 
-            # Build a result preview for the frontend
             try:
                 result_obj = json.loads(result_str)
                 if isinstance(result_obj, list):
-                    preview = f"找到 {len(result_obj)} 条结果"
+                    preview = f"搜索完成，找到 {len(result_obj)} 组结果"
                 elif isinstance(result_obj, dict) and "error" in result_obj:
                     preview = result_obj["error"]
                 else:
-                    preview = "查询完成"
+                    preview = "搜索完成"
             except (json.JSONDecodeError, TypeError):
                 preview = result_str[:100]
 
@@ -91,15 +122,11 @@ async def run(
                 "result_preview": preview,
             }
 
-            # Append tool result to conversation
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
                 "content": result_str,
             })
-    else:
-        # Max rounds reached → force final response
-        pass
 
     # ---- Final streaming response ----
     full_text = ""
