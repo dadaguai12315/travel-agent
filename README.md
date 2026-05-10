@@ -1,4 +1,4 @@
-# 🌍 Travel Advisor v2
+# 🌍 Travel Advisor
 
 基于 LLM 的智能旅行规划助手。支持多轮对话、流式输出、Web 搜索增强，可生成结构化、可执行的旅行计划。
 
