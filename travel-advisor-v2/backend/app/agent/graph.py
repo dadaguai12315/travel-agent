@@ -1,112 +1,24 @@
 """
 State Graph Controller
 
-Orchestrates the multi-node agent workflow as a finite state machine.
+Orchestrates the multi-node agent workflow with LLM-powered streaming.
 
 Workflow:
-    START → Analyzer → [route by intent]
-      ├─ "new_plan" → Researcher → Planner → Reviewer → [route by review]
-      │                                                   ├─ passed → Streamer → END
-      │                                                   └─ failed → Planner (retry)
-      ├─ "modify_plan" → Planner → Reviewer → Streamer → END
-      └─ "chat" → Streamer → END
+    START → Analyzer → [route]
+      ├─ "new_plan" → Research → Plan & Stream → END
+      ├─ "modify_plan" → Plan & Stream → END
+      └─ "chat" → Quick Stream → END
 """
 
 from collections.abc import AsyncIterator
 
 from app.agent.nodes.analyzer import run_analyzer
-from app.agent.nodes.planner import run_planner
+from app.agent.nodes.planner import _build_context
 from app.agent.nodes.researcher import run_researcher
 from app.agent.nodes.reviewer import run_reviewer
-from app.agent.nodes.streamer import run_streamer
 from app.agent.state import AgentState
-
-# Maximum total iterations before forced termination
-MAX_ITERATIONS = 10
-
-
-def route_after_analyzer(state: AgentState) -> str:
-    """Decide next node based on intent analysis."""
-    intent = state.get("intent", "chat")
-    if intent == "new_plan":
-        return "researcher"
-    elif intent == "modify_plan":
-        return "planner"
-    else:
-        return "streamer"
-
-
-def route_after_reviewer(state: AgentState) -> str:
-    """Decide: accept plan → stream, or reject → re-plan."""
-    if state.get("review_passed", False):
-        return "streamer"
-    else:
-        return "planner"
-
-
-# Node runner registry
-NODE_RUNNERS = {
-    "analyzer": run_analyzer,
-    "researcher": run_researcher,
-    "planner": run_planner,
-    "reviewer": run_reviewer,
-    "streamer": run_streamer,
-}
-
-# Routing functions
-ROUTERS = {
-    "analyzer": route_after_analyzer,
-    "reviewer": route_after_reviewer,
-}
-
-
-async def run_workflow(state: AgentState) -> AgentState:
-    """Execute the full agent workflow.
-
-    Returns the final state with final_response populated.
-    """
-    state["iteration"] = 0
-    state["errors"] = []
-    state["node_history"] = []
-
-    # Start with analyzer
-    current_node = "analyzer"
-
-    while state["iteration"] < MAX_ITERATIONS:
-        state["iteration"] += 1
-
-        # Run current node
-        runner = NODE_RUNNERS.get(current_node)
-        if not runner:
-            state["errors"].append(f"Unknown node: {current_node}")
-            break
-
-        state = await runner(state)
-
-        # Terminal node
-        if current_node == "streamer":
-            break
-
-        # Route to next node
-        router = ROUTERS.get(current_node)
-        if router:
-            next_node = router(state)
-        else:
-            # Linear flow: researcher → planner, planner → reviewer
-            if current_node == "researcher":
-                next_node = "planner"
-            elif current_node == "planner":
-                next_node = "reviewer"
-            else:
-                next_node = "streamer"
-
-        current_node = next_node
-
-    # Ensure we always have a response
-    if not state.get("final_response"):
-        state["final_response"] = "抱歉，处理您的请求时遇到了问题，请重试。"
-
-    return state
+from app.core.llm_client import chat_completion_stream, get_system_prompt
+from app.core.llm_prompts import SYSTEM_PROMPT_NO_SEARCH
 
 
 async def run_workflow_stream(
@@ -115,20 +27,17 @@ async def run_workflow_stream(
     user_message: str,
     conversation_history: list[dict] | None = None,
 ) -> AsyncIterator[dict]:
-    """Execute workflow and yield SSE events for streaming.
+    """Execute agent workflow and yield SSE events.
 
-    Yields:
-        {"event": "status", "data": {"msg": "..."}}
-        {"event": "tool_call", "data": {"tool": "...", "query": "..."}}
-        {"event": "content", "data": {"text": "..."}}
-        {"event": "error", "data": {"code": 500, "msg": "..."}}
-        {"event": "done", "data": {"usage": {...}}}
+    Phase 4: real LLM calls throughout. Streaming final response via SSE.
     """
+    history = conversation_history or []
+
     state: AgentState = {
         "session_id": session_id,
         "user_id": user_id,
         "user_message": user_message,
-        "conversation_history": conversation_history or [],
+        "conversation_history": history,
         "intent": "",
         "extracted_preferences": {},
         "search_queries": [],
@@ -143,53 +52,58 @@ async def run_workflow_stream(
         "node_history": [],
     }
 
-    try:
-        # Run analyzer
-        yield {"event": "status", "data": {"msg": "正在分析您的需求..."}}
-        state = await run_analyzer(state)
-        intent = state.get("intent", "chat")
+    # Step 1: Analyze intent (LLM, non-streaming)
+    yield {"event": "status", "data": {"msg": "正在分析您的需求..."}}
+    state = await run_analyzer(state)
+    intent = state.get("intent", "new_plan")
 
-        if intent == "new_plan":
-            # Research
-            yield {"event": "status", "data": {"msg": "正在搜索最新旅行信息..."}}
-            state = await run_researcher(state)
+    if intent == "chat":
+        # Simple chat: stream quick LLM response
+        yield {"event": "status", "data": {"msg": ""}}
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_NO_SEARCH},
+            *history[-6:],
+            {"role": "user", "content": user_message},
+        ]
+        async for token in chat_completion_stream(messages):
+            yield {"event": "content", "data": {"text": token}}
+        yield {"event": "done", "data": {"usage": {"tokens": 0}}}
+        return
 
-            # Yield tool calls for frontend
-            for q in state.get("search_queries", []):
-                yield {"event": "tool_call", "data": {"tool": "web_search", "query": q}}
+    # Step 2: Research (Tavily web search)
+    if intent == "new_plan":
+        yield {"event": "status", "data": {"msg": "正在搜索最新旅行信息..."}}
+        state = await run_researcher(state)
+        for q in state.get("search_queries", []):
+            yield {"event": "tool_call", "data": {"tool": "web_search", "query": q}}
 
-            # Plan
-            yield {"event": "status", "data": {"msg": "正在生成旅行计划..."}}
-            state = await run_planner(state)
+    # Step 3: Build context and stream the plan
+    yield {"event": "status", "data": {"msg": "正在生成旅行计划..."}}
 
-            # Review
-            yield {"event": "status", "data": {"msg": "正在审核计划..."}}
-            state = await run_reviewer(state)
+    # Generate plan via non-streaming first (for review)
+    from app.agent.nodes.planner import run_planner
 
-            # Re-plan if needed (up to 2 retries)
-            while not state.get("review_passed") and state.get("plan_iteration", 0) < 3:
-                yield {"event": "status", "data": {"msg": "正在优化计划..."}}
-                state = await run_planner(state)
-                state = await run_reviewer(state)
+    state = await run_planner(state)
+    state = await run_reviewer(state)
 
-        elif intent == "modify_plan":
-            yield {"event": "status", "data": {"msg": "正在调整您的计划..."}}
-            state = await run_planner(state)
-            state = await run_reviewer(state)
+    # Retry if review failed (up to 2 times)
+    retries = 0
+    while not state.get("review_passed") and retries < 2:
+        yield {"event": "status", "data": {"msg": f"正在优化计划...（第{retries+1}次调整）"}}
+        state = await run_planner(state)
+        state = await run_reviewer(state)
+        retries += 1
 
-        # Stream final response
-        response = state.get("final_response", "")
-        yield {"event": "status", "data": {"msg": "完成！"}}
+    # Step 4: Stream the final plan
+    plan = state.get("draft_plan", "")
 
-        # In Phase 4, this will stream token-by-token via LLM
-        # For Phase 3, we send the entire mock response
-        if response:
-            yield {"event": "content", "data": {"text": response}}
+    if plan:
+        # Send plan in chunks for a streaming feel
+        chunk_size = 50
+        for i in range(0, len(plan), chunk_size):
+            yield {
+                "event": "content",
+                "data": {"text": plan[i : i + chunk_size]},
+            }
 
-        yield {
-            "event": "done",
-            "data": {"usage": {"tokens": 0}, "node_history": state.get("node_history", [])},
-        }
-
-    except Exception as e:
-        yield {"event": "error", "data": {"code": 500, "msg": str(e)}}
+    yield {"event": "done", "data": {"usage": {"tokens": 0}}}
