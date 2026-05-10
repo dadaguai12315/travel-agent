@@ -37,6 +37,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://travel:travel@postgres:5432/travel_advisor
       REDIS_URL: redis://redis:6379/0
       DEBUG: "true"
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +55,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5173:5173"
+    environment:
+      VITE_API_TARGET: http://backend:8000
     depends_on:
       - backend
     volumes:
