@@ -14,6 +14,31 @@ const chat = useChatStore()
 const { messages, isStreaming, progressMsg, activeSessionId } = storeToRefs(chat)
 const menuOpen = ref(false)
 const isDark = ref(localStorage.getItem('theme') === 'dark')
+const exportingPpt = ref(false)
+
+async function exportPpt() {
+  if (!activeSessionId.value || exportingPpt.value) return
+  exportingPpt.value = true
+  try {
+    const token = localStorage.getItem('auth_token')
+    const resp = await fetch(`/api/v1/ppt/generate?session_id=${activeSessionId.value}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!resp.ok) throw new Error('Export failed')
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'travel-plan.pptx'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    alert('导出失败，请重试')
+  } finally {
+    exportingPpt.value = false
+  }
+}
 
 function applyTheme() {
   document.documentElement.classList.toggle('dark', isDark.value)
@@ -58,6 +83,14 @@ onMounted(async () => {
       <header class="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-shrink-0">
         <h1 class="text-base font-semibold">🌍 Travel Advisor</h1>
         <div class="flex items-center gap-3">
+          <button
+            v-if="activeSessionId && messages.length > 0"
+            class="px-3 py-1.5 border border-accent/30 rounded-full text-xs text-accent hover:bg-accent/5 transition-colors"
+            :disabled="exportingPpt"
+            @click="exportPpt"
+          >
+            {{ exportingPpt ? '导出中...' : '📄 导出PPT' }}
+          </button>
           <button
             class="px-3 py-1.5 border border-gray-200 rounded-full text-xs text-gray-500 hover:border-gray-900 hover:text-gray-900 transition-colors"
             @click="chat.newChat()"

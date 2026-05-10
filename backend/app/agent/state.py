@@ -34,6 +34,12 @@ class AgentState(TypedDict, total=False):
     # Error tracking
     errors: list[str]
 
+    # PPT pipeline
+    travel_json: dict
+    slide_dsl: list[dict]
+    slide_theme: str
+    visual_assets: list[dict]
+
     # Metadata
     iteration: int  # Total loop counter (prevents infinite loops)
     node_history: list[str]  # Track which nodes have been visited
