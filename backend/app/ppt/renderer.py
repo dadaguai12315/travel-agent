@@ -2,16 +2,87 @@
 PPT Renderer — Programmatic PPTX generation from Slide DSL.
 
 Rule: The renderer is NOT an LLM. It follows template constraints.
-- enforce consistent spacing
-- enforce typography hierarchy
-- avoid text overflow
-- preserve theme consistency
 """
 import io
+import httpx
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN
+
+from app.core.config import settings
+
+# ---- Image fetching via Tavily ----
+IMAGE_CACHE: dict[str, bytes] = {}
+
+async def _fetch_images(queries: list[str]) -> list[bytes]:
+    """Search images via Tavily and download them. Returns list of image bytes."""
+    if not settings.tavily_api_key:
+        return await _fallback_images(queries)
+
+    results = []
+    for q in queries[:3]:
+        if q in IMAGE_CACHE:
+            results.append(IMAGE_CACHE[q])
+            continue
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=settings.tavily_api_key)
+            resp = client.search(query=q, search_depth="basic", include_images=True, max_results=3)
+            image_urls = resp.get("images", [])
+            if image_urls:
+                img_bytes = await _download_image(image_urls[0])
+                if img_bytes:
+                    IMAGE_CACHE[q] = img_bytes
+                    results.append(img_bytes)
+        except Exception:
+            pass
+    return results
+
+
+async def _download_image(url: str) -> bytes | None:
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200 and len(resp.content) > 2000:
+                return resp.content
+    except Exception:
+        pass
+    return None
+
+
+async def _fallback_images(queries: list[str]) -> list[bytes]:
+    """Fallback: Unsplash when Tavily not configured."""
+    results = []
+    for q in queries[:2]:
+        if q in IMAGE_CACHE:
+            results.append(IMAGE_CACHE[q])
+            continue
+        try:
+            url = f"https://source.unsplash.com/800x600/?{q}"
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200 and len(resp.content) > 2000:
+                    IMAGE_CACHE[q] = resp.content
+                    results.append(resp.content)
+        except Exception:
+            pass
+    return results
+
+
+def _embed_image(slide, image_bytes: bytes, left, top, width, height):
+    """Embed an image into a slide."""
+    import io as _io
+    try:
+        slide.shapes.add_picture(_io.BytesIO(image_bytes),
+                                 Inches(left), Inches(top),
+                                 Inches(width), Inches(height))
+    except Exception:
+        rect = slide.shapes.add_shape(
+            1, Inches(left), Inches(top), Inches(width), Inches(height))
+        rect.fill.solid()
+        rect.fill.fore_color.rgb = _color("E8E8E8")
+        rect.line.fill.background()
 
 # ---- Theme System ----
 THEMES = {
@@ -33,24 +104,32 @@ def _color(hex_str: str) -> RGBColor:
     return RGBColor(int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
 
-def render_pptx(slides: list[dict], theme_name: str = "minimal") -> bytes:
+async def render_pptx(slides: list[dict], theme_name: str = "minimal",
+                     assets: list[dict] | None = None) -> bytes:
     """Render a list of slide DSL dicts into a .pptx file. Returns bytes."""
     prs = Presentation()
     prs.slide_width = WIDTH
     prs.slide_height = HEIGHT
 
     theme = THEMES.get(theme_name, DEFAULT_THEME)
+    assets = assets or []
 
-    # Remove default blank layout and use a blank canvas
     blank_layout = prs.slide_layouts[6]  # blank
 
-    for s in slides:
+    for idx, s in enumerate(slides):
         slide_type = s.get("slide_type", "content")
         slide = prs.slides.add_slide(blank_layout)
         _set_bg(slide, theme["bg"])
 
+        # Find matching asset for this slide
+        asset_queries = []
+        for a in assets:
+            if a.get("slide_index") == idx:
+                asset_queries = a.get("queries", [])
+                break
+
         if slide_type == "cover":
-            _render_cover(slide, s, theme)
+            await _render_cover(slide, s, theme, asset_queries)
         elif slide_type in ("overview", "itinerary", "timeline"):
             _render_timeline(slide, s, theme)
         elif slide_type in ("food", "hotel", "tips"):
@@ -60,7 +139,7 @@ def render_pptx(slides: list[dict], theme_name: str = "minimal") -> bytes:
         elif slide_type == "ending":
             _render_ending(slide, s, theme)
         elif slide_type == "map":
-            _render_map_slide(slide, s, theme)
+            await _render_map_slide(slide, s, theme, asset_queries)
         else:
             _render_content(slide, s, theme)
 
@@ -94,15 +173,25 @@ def _add_text_box(slide, left, top, width, height, text, font_size=18, bold=Fals
 
 # ---- Slide Renderers ----
 
-def _render_cover(slide, s, theme):
+async def _render_cover(slide, s, theme, asset_queries: list[str]):
     title = s.get("title", "Travel Plan")
     subtitle = s.get("subtitle", "")
-    _add_text_box(slide, 1.5, 2.2, 10, 1.5, title, 48, True, theme["accent"],
+
+    # Fetch cover image
+    images = await _fetch_images(asset_queries)
+    if images:
+        _embed_image(slide, images[0], 6.8, 0, 6.6, 7.5)
+        # Left panel overlay for text readability
+        panel = slide.shapes.add_shape(1, Inches(0), Inches(0), Inches(7.2), Inches(7.5))
+        panel.fill.solid()
+        panel.fill.fore_color.rgb = _color(theme["bg"])
+        panel.line.fill.background()
+
+    _add_text_box(slide, 0.8, 2.2, 5.5, 1.5, title, 44, True, theme["accent"],
                   PP_ALIGN.LEFT, "Arial Black")
     if subtitle:
-        _add_text_box(slide, 1.5, 3.7, 8, 0.8, subtitle, 22, False, theme["sub"])
-    # Accent line
-    line = slide.shapes.add_shape(1, Inches(1.5), Inches(4.7), Inches(3), Inches(0.04))  # rectangle as line
+        _add_text_box(slide, 0.8, 3.7, 5, 0.8, subtitle, 20, False, theme["sub"])
+    line = slide.shapes.add_shape(1, Inches(0.8), Inches(4.7), Inches(3), Inches(0.04))
     line.fill.solid()
     line.fill.fore_color.rgb = _color(theme["accent"])
     line.line.fill.background()
@@ -142,8 +231,21 @@ def _render_cards(slide, s, theme):
     items = s.get("items", [])
     _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
 
-    # Grid layout: 2-3 columns
+    # Normalize items: strings → {name: str, desc: ""}
+    normalized = []
+    for item in items:
+        if isinstance(item, str):
+            normalized.append({"name": item[:60], "desc": ""})
+        elif isinstance(item, dict):
+            normalized.append({
+                "name": str(item.get("name", item.get("title", "")))[:60],
+                "desc": str(item.get("desc", item.get("subtitle", "")))[:120]
+            })
+    items = normalized
+
     n = len(items)
+    if n == 0:
+        return
     cols = 2 if n <= 4 else 3
     col_w = 11.5 / cols
     for i, item in enumerate(items):
@@ -151,18 +253,16 @@ def _render_cards(slide, s, theme):
         col = i % cols
         x = 0.8 + col * col_w
         y = 1.6 + row * 2.5
-        # Card background
         card = slide.shapes.add_shape(
             1, Inches(x), Inches(y), Inches(col_w - 0.4), Inches(2.0))
         card.fill.solid()
         card.fill.fore_color.rgb = _color("FFFFFF")
         card.line.color.rgb = _color("E0E0E0")
         card.line.width = Pt(0.5)
-        # Card content
         _add_text_box(slide, x + 0.2, y + 0.15, col_w - 0.8, 0.4,
-                      item.get("name", item.get("title", ""))[:40], 16, True, theme["accent"])
+                      item["name"][:40], 16, True, theme["accent"])
         _add_text_box(slide, x + 0.2, y + 0.7, col_w - 0.8, 1.0,
-                      item.get("desc", item.get("subtitle", ""))[:120], 11, False, theme["text"])
+                      item["desc"][:120], 11, False, theme["text"])
 
 
 def _render_budget(slide, s, theme):
@@ -186,23 +286,29 @@ def _render_budget(slide, s, theme):
     y += 0.5
     # Data rows
     for item in items[:8]:
-        for j, key in enumerate(["category", "detail", "amount"]):
-            _add_text_box(slide, x_positions[j], y, col_widths[j], 0.35,
-                          str(item.get(key, ""))[:50], 12, False, theme["text"])
+        if isinstance(item, str):
+            _add_text_box(slide, 0.8, y, 11, 0.35, f"• {item[:80]}", 12, False, theme["text"])
+        else:
+            for j, key in enumerate(["category", "detail", "amount"]):
+                _add_text_box(slide, x_positions[j], y, col_widths[j], 0.35,
+                              str(item.get(key, ""))[:50], 12, False, theme["text"])
         y += 0.4
 
     if total:
         _add_text_box(slide, 0.8, y + 0.2, 11, 0.4, total, 16, True, theme["accent"])
 
 
-def _render_map_slide(slide, s, theme):
+async def _render_map_slide(slide, s, theme, asset_queries: list[str]):
     title = s.get("title", "Route Map")
     _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
-    _add_text_box(slide, 0.8, 1.5, 11, 0.5, "🗺️ 路线示意图", 14, False, theme["sub"])
-    # Placeholder for map
-    _add_text_box(slide, 0.8, 2.5, 11.5, 4.0,
-                  s.get("description", "主要城市 → 景点 → 餐厅\n按行程顺序连接"),
-                  14, False, theme["sub"])
+
+    images = await _fetch_images(asset_queries)
+    if images:
+        _embed_image(slide, images[0], 0.8, 1.5, 11.5, 5.5)
+    else:
+        _add_text_box(slide, 0.8, 2.5, 11.5, 4.0,
+                      s.get("description", "路线示意图"),
+                      14, False, theme["sub"])
 
 
 def _render_ending(slide, s, theme):

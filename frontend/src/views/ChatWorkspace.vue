@@ -15,10 +15,14 @@ const { messages, isStreaming, progressMsg, activeSessionId } = storeToRefs(chat
 const menuOpen = ref(false)
 const isDark = ref(localStorage.getItem('theme') === 'dark')
 const exportingPpt = ref(false)
+const pptProgress = ref('')
+const pptStage = ref('')
 
 async function exportPpt() {
   if (!activeSessionId.value || exportingPpt.value) return
   exportingPpt.value = true
+  pptProgress.value = ''
+  pptStage.value = ''
   try {
     const token = localStorage.getItem('auth_token')
     const resp = await fetch(`/api/v1/ppt/generate?session_id=${activeSessionId.value}`, {
@@ -26,17 +30,47 @@ async function exportPpt() {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!resp.ok) throw new Error('Export failed')
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'travel-plan.pptx'
-    a.click()
-    URL.revokeObjectURL(url)
+
+    const reader = resp.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+      for (const part of parts) {
+        const line = part.trim()
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'progress') {
+            pptStage.value = data.stage
+            pptProgress.value = data.msg
+          } else if (data.type === 'done') {
+            pptProgress.value = '下载中...'
+            // Trigger download
+            const blobResp = await fetch(`/api/v1/ppt/download/${data.token}`)
+            const blob = await blobResp.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url; a.download = 'travel-plan.pptx'; a.click()
+            URL.revokeObjectURL(url)
+            pptProgress.value = ''
+          } else if (data.type === 'error') {
+            alert('导出失败: ' + data.msg)
+          }
+        } catch { /* skip malformed events */ }
+      }
+    }
   } catch (e) {
     alert('导出失败，请重试')
   } finally {
     exportingPpt.value = false
+    pptProgress.value = ''
+    pptStage.value = ''
   }
 }
 
@@ -137,6 +171,19 @@ onMounted(async () => {
           </div>
         </div>
       </header>
+
+      <!-- PPT Progress Bar -->
+      <div v-if="pptProgress" class="px-5 py-2 bg-accent/5 border-b border-accent/10 flex items-center gap-3 flex-shrink-0">
+        <div class="flex-1">
+          <div class="text-xs text-accent font-medium mb-1">{{ pptProgress }}</div>
+          <div class="h-1 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              class="h-full bg-accent rounded-full transition-all duration-500"
+              :style="{ width: pptStage === 'structurer' ? '25%' : pptStage === 'planner' ? '50%' : pptStage === 'assets' ? '75%' : '90%' }"
+            ></div>
+          </div>
+        </div>
+      </div>
 
       <!-- Messages -->
       <div class="chat-messages flex-1 overflow-y-auto px-4 py-4">

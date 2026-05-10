@@ -19,25 +19,25 @@ STRUCTURER_PROMPT = """You are a travel data extraction engine. Convert the trav
 Output ONLY valid JSON. No explanations. No markdown fences.
 
 Schema:
-{
+{{
   "title": "short trip title",
   "destination": "main destination",
   "duration_days": 3,
   "travel_style": "cultural / beach / adventure / etc",
   "traveler_type": "couple / family / solo / etc",
-  "budget": {"total": "5000 CNY", "per_person": "2500 CNY"},
+  "budget": {{"total": "5000 CNY", "per_person": "2500 CNY"}},
   "days": [
-    {
+    {{
       "day": 1,
       "theme": "Arrival & First Taste",
       "city": "city name",
       "activities": ["activity 1", "activity 2"],
-      "foods": [{"name": "restaurant", "cuisine": "local", "cost": "60 CNY"}],
-      "hotel": {"name": "Hotel Name", "area": "central", "cost_per_night": "300 CNY"},
-      "transportation": [{"from": "Airport", "to": "Hotel", "mode": "taxi", "cost": "80 CNY"}]
-    }
+      "foods": [{{"name": "restaurant", "cuisine": "local", "cost": "60 CNY"}}],
+      "hotel": {{"name": "Hotel Name", "area": "central", "cost_per_night": "300 CNY"}},
+      "transportation": [{{"from": "Airport", "to": "Hotel", "mode": "taxi", "cost": "80 CNY"}}]
+    }}
   ]
-}
+}}
 
 Travel plan:
 {travel_plan}"""
@@ -72,48 +72,48 @@ Rules:
 - Theme name: minimal / japan / tropical / ocean / editorial / nature (pick best fit)
 
 Output:
-{
+{{
   "theme": "tropical",
   "slides": [
-    {
+    {{
       "slide_type": "cover",
       "title": "Phuket 5-Day Escape",
       "subtitle": "Beach · Island Hopping · Thai Food",
       "layout": "hero"
-    },
-    {
+    }},
+    {{
       "slide_type": "timeline",
       "title": "Itinerary Overview",
       "subtitle": "Day-by-day plan",
       "layout": "timeline",
       "days": [
-        {"day": 1, "theme": "Arrival & Sunset", "activities": ["Airport → Hotel", "Beach sunset", "Night market"]}
+        {{"day": 1, "theme": "Arrival & Sunset", "activities": ["Airport → Hotel", "Beach sunset", "Night market"]}}
       ]
-    },
-    {
+    }},
+    {{
       "slide_type": "food",
       "title": "Must-Try Foods",
       "layout": "cards",
       "items": [
-        {"name": "Tom Yum Goong", "desc": "Spicy sour shrimp soup - a Thai classic"}
+        {{"name": "Tom Yum Goong", "desc": "Spicy sour shrimp soup - a Thai classic"}}
       ]
-    },
-    {
+    }},
+    {{
       "slide_type": "budget",
       "title": "Budget Breakdown",
       "layout": "table",
       "items": [
-        {"category": "Flights", "detail": "Round trip BKK-HKT", "amount": "1,200 CNY"}
+        {{"category": "Flights", "detail": "Round trip BKK-HKT", "amount": "1,200 CNY"}}
       ],
       "total": "Total: 4,500 CNY (2,250/person)"
-    },
-    {
+    }},
+    {{
       "slide_type": "ending",
       "title": "Safe Travels! 🏝️",
       "subtitle": "Your Phuket adventure awaits"
-    }
+    }}
   ]
-}
+}}
 
 Travel data:
 {travel_json}"""
@@ -141,12 +141,12 @@ async def slide_planner_node(state: AgentState) -> AgentState:
 VISUAL_PROMPT = """Generate image search queries for presentation slides.
 
 Output ONLY valid JSON:
-{
+{{
   "assets": [
-    {"slide_index": 0, "queries": ["Thailand beach sunset cinematic wide"]},
-    {"slide_index": 1, "queries": ["Phuket island map"]}
+    {{"slide_index": 0, "queries": ["Thailand beach sunset cinematic wide"]}},
+    {{"slide_index": 1, "queries": ["Phuket island map"]}}
   ]
-}
+}}
 
 Slides:
 {slides_json}"""
@@ -173,6 +173,31 @@ async def visual_asset_node(state: AgentState) -> AgentState:
 
 
 # ---- Pipeline Orchestrator ----
+
+async def generate_pptx_stream(plan_text: str):
+    """Yield progress events during PPT generation."""
+    yield {"type": "progress", "stage": "structurer", "msg": "正在解析旅行计划..."}
+    state = await structurer_node(_init_state(plan_text))
+
+    yield {"type": "progress", "stage": "planner", "msg": "正在设计幻灯片布局..."}
+    state = await slide_planner_node(state)
+
+    yield {"type": "progress", "stage": "assets", "msg": "正在搜索相关图片..."}
+    state = await visual_asset_node(state)
+
+    yield {"type": "progress", "stage": "render", "msg": "正在生成PPT文件..."}
+
+
+def _init_state(plan_text: str) -> AgentState:
+    return {
+        "final_response": plan_text,
+        "travel_json": {},
+        "slide_dsl": [],
+        "slide_theme": "minimal",
+        "visual_assets": [],
+        "node_history": [],
+    }
+
 
 async def generate_pptx(plan_text: str) -> bytes:
     """Run the full pipeline: text → JSON → DSL → assets → PPTX.
@@ -206,7 +231,8 @@ async def generate_pptx(plan_text: str) -> bytes:
         slides = _fallback_slides(state.get("travel_json", {}))
         theme = "minimal"
 
-    pptx_bytes = render_pptx(slides, theme)
+    assets = state.get("visual_assets", [])
+    pptx_bytes = await render_pptx(slides, theme, assets)
     return pptx_bytes
 
 
