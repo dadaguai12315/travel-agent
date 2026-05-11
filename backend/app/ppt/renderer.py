@@ -105,7 +105,11 @@ def _embed_image(slide, image_bytes: bytes, left, top, width, height):
         slide.shapes.add_picture(io.BytesIO(image_bytes),
                                  Inches(left), Inches(top),
                                  Inches(width), Inches(height))
-    except Exception:
+        logger.info("Embedded image at (%.1f, %.1f) size %.1fx%.1f, %d bytes",
+                     left, top, width, height, len(image_bytes))
+    except Exception as e:
+        logger.warning("Failed to embed image (%d bytes), falling back to placeholder: %s",
+                       len(image_bytes), e)
         rect = slide.shapes.add_shape(
             1, Inches(left), Inches(top), Inches(width), Inches(height))
         rect.fill.solid()
@@ -144,14 +148,12 @@ async def render_pptx(slides: list[dict], theme_name: str = "minimal",
 
     blank_layout = prs.slide_layouts[6]
 
-    # Pre-fetch all slide images concurrently before render loop
+    # Pre-fetch images for ALL slides that have asset queries
     image_futures = {}
-    slides_needing_images = {"cover", "map"}
     for idx, s in enumerate(slides):
-        if s.get("slide_type") in slides_needing_images:
-            queries = _get_asset_queries(assets, idx)
-            if queries:
-                image_futures[idx] = asyncio.ensure_future(_fetch_images(queries))
+        queries = _get_asset_queries(assets, idx)
+        if queries:
+            image_futures[idx] = asyncio.ensure_future(_fetch_images(queries))
 
     for idx, s in enumerate(slides):
         slide_type = s.get("slide_type", "content")
@@ -163,10 +165,7 @@ async def render_pptx(slides: list[dict], theme_name: str = "minimal",
             images = await image_futures[idx]
 
         render = _SLIDE_RENDERERS.get(slide_type, _render_content)
-        if slide_type in slides_needing_images:
-            await render(slide, s, theme, images or [])  # type: ignore[operator]
-        else:
-            render(slide, s, theme)  # type: ignore[operator]
+        render(slide, s, theme, images or [])
 
     # Log image embedding summary
     slides_with_images = [i for i in image_futures]
@@ -214,7 +213,8 @@ def _add_text_box(slide, left, top, width, height, text, font_size=18, bold=Fals
 
 # ---- Slide Renderers ----
 
-async def _render_cover(slide, s, theme, images: list[bytes]):
+def _render_cover(slide, s, theme, images: list[bytes] | None = None):
+    images = images or []
     title = s.get("title", "Travel Plan")
     subtitle = s.get("subtitle", "")
 
@@ -235,11 +235,15 @@ async def _render_cover(slide, s, theme, images: list[bytes]):
     line.line.fill.background()
 
 
-def _render_timeline(slide, s, theme):
+def _render_timeline(slide, s, theme, images: list[bytes] | None = None):
     title = s.get("title", "Itinerary")
     subtitle = s.get("subtitle", "")
     days = s.get("days", [])
-    _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
+
+    if images:
+        _embed_image(slide, images[0], 9.8, 0.3, 3.2, 2.4)
+
+    _add_text_box(slide, 0.8, 0.4, 8.5, 0.7, title, 28, True, theme["text"])
     if subtitle:
         _add_text_box(slide, 0.8, 1.0, 11, 0.5, subtitle, 16, False, theme["sub"])
 
@@ -261,10 +265,14 @@ def _render_timeline(slide, s, theme):
             y += 0.7
 
 
-def _render_cards(slide, s, theme):
+def _render_cards(slide, s, theme, images: list[bytes] | None = None):
     title = s.get("title", "")
     items = s.get("items", [])
-    _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
+
+    if images:
+        _embed_image(slide, images[0], 9.8, 0.3, 3.2, 2.4)
+
+    _add_text_box(slide, 0.8, 0.4, 8.5, 0.7, title, 28, True, theme["text"])
 
     normalized = []
     for item in items:
@@ -299,11 +307,11 @@ def _render_cards(slide, s, theme):
                       item["desc"][:120], 11, False, theme["text"])
 
 
-def _render_budget(slide, s, theme):
+def _render_budget(slide, s, theme, images: list[bytes] | None = None):
     title = s.get("title", "Budget")
     items = s.get("items", [])
     total = s.get("total", "")
-    _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
+    _add_text_box(slide, 0.8, 0.4, 8.5, 0.7, title, 28, True, theme["text"])
 
     headers = ["类别", "明细", "金额"]
     col_widths = [2.5, 6.0, 3.0]
@@ -329,7 +337,8 @@ def _render_budget(slide, s, theme):
         _add_text_box(slide, 0.8, y + 0.2, 11, 0.4, total, 16, True, theme["accent"])
 
 
-async def _render_map_slide(slide, s, theme, images: list[bytes]):
+def _render_map_slide(slide, s, theme, images: list[bytes] | None = None):
+    images = images or []
     title = s.get("title", "Route Map")
     _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
 
@@ -341,14 +350,14 @@ async def _render_map_slide(slide, s, theme, images: list[bytes]):
                       14, False, theme["sub"])
 
 
-def _render_ending(slide, s, theme):
+def _render_ending(slide, s, theme, images: list[bytes] | None = None):
     _add_text_box(slide, 1.5, 2.8, 10, 1.0, s.get("title", "Bon Voyage! ✈️"),
                   42, True, theme["accent"], PP_ALIGN.CENTER, "Arial Black")
     _add_text_box(slide, 1.5, 3.8, 10, 0.6, s.get("subtitle", "Have a wonderful trip"),
                   20, False, theme["sub"], PP_ALIGN.CENTER)
 
 
-def _render_content(slide, s, theme):
+def _render_content(slide, s, theme, images: list[bytes] | None = None):
     title = s.get("title", "")
     bullets = s.get("bullets", [])
     _add_text_box(slide, 0.8, 0.4, 11, 0.7, title, 28, True, theme["text"])
