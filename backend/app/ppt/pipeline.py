@@ -15,6 +15,11 @@ from app.core.llm_client import chat_completion
 from app.ppt.renderer import render_pptx
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter('%(levelname)s [ppt] %(message)s'))
+    logger.addHandler(_h)
 
 
 def _clean_json_response(content: str) -> str:

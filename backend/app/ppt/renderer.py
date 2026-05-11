@@ -15,6 +15,11 @@ from pptx.enum.text import PP_ALIGN
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter('%(levelname)s [ppt] %(message)s'))
+    logger.addHandler(_h)
 
 # ---- Image fetching via Tavily ----
 _IMAGE_CACHE: dict[str, bytes] = {}
