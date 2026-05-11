@@ -8,10 +8,13 @@ Pipeline:
 LLM only generates structured data. Rendering is programmatic.
 """
 import json
+import logging
 
 from app.agent.state import AgentState
 from app.core.llm_client import chat_completion
 from app.ppt.renderer import render_pptx
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_json_response(content: str) -> str:
@@ -166,6 +169,9 @@ async def visual_asset_node(state: AgentState) -> AgentState:
     content = _clean_json_response(response.get("content", "{}"))
     try:
         state["visual_assets"] = json.loads(content).get("assets", [])
+        logger.info("Visual asset queries generated: %d asset groups for %d slides",
+                     len(state["visual_assets"]),
+                     sum(1 for a in state["visual_assets"] if a.get("queries")))
     except json.JSONDecodeError:
         state["visual_assets"] = []
     return state

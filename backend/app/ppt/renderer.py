@@ -5,6 +5,7 @@ Rule: the renderer is NOT an LLM. It follows template constraints.
 """
 import asyncio
 import io
+import logging
 import httpx
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -12,6 +13,8 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---- Image fetching via Tavily ----
 _IMAGE_CACHE: dict[str, bytes] = {}
@@ -25,6 +28,7 @@ async def _fetch_images(queries: list[str]) -> list[bytes]:
 
     async def _fetch_one(q: str) -> bytes | None:
         if q in _IMAGE_CACHE:
+            logger.debug("Image cache hit: %s", q[:60])
             return _IMAGE_CACHE[q]
         try:
             from tavily import TavilyClient
@@ -32,12 +36,18 @@ async def _fetch_images(queries: list[str]) -> list[bytes]:
             resp = client.search(query=q, search_depth="basic", include_images=True, max_results=3)
             image_urls = resp.get("images", [])
             if image_urls:
+                logger.info("Tavily found %d images for query '%s'", len(image_urls), q[:60])
                 img_bytes = await _download_image(image_urls[0])
                 if img_bytes:
                     _cache_image(q, img_bytes)
+                    logger.info("Downloaded image %d bytes from %s", len(img_bytes), image_urls[0][:80])
                     return img_bytes
+                else:
+                    logger.warning("Failed to download image from %s", image_urls[0][:80])
+            else:
+                logger.warning("Tavily returned no images for query '%s'", q[:60])
         except Exception:
-            pass
+            logger.exception("Tavily search failed for query '%s'", q[:60])
         return None
 
     results = await asyncio.gather(*(_fetch_one(q) for q in queries[:3]))
@@ -62,6 +72,7 @@ async def _download_image(url: str) -> bytes | None:
 
 
 async def _fallback_images(queries: list[str]) -> list[bytes]:
+    logger.info("Using Unsplash fallback for images (no Tavily API key)")
     async def _fetch_one(q: str) -> bytes | None:
         if q in _IMAGE_CACHE:
             return _IMAGE_CACHE[q]
@@ -71,9 +82,13 @@ async def _fallback_images(queries: list[str]) -> list[bytes]:
                 resp = await client.get(url)
                 if resp.status_code == 200 and len(resp.content) > 2000:
                     _cache_image(q, resp.content)
+                    logger.info("Unsplash download success for '%s': %d bytes", q[:60], len(resp.content))
                     return resp.content
+                else:
+                    logger.warning("Unsplash returned status %d, %d bytes for '%s'",
+                                   resp.status_code, len(resp.content), q[:60])
         except Exception:
-            pass
+            logger.exception("Unsplash download failed for '%s'", q[:60])
         return None
 
     results = await asyncio.gather(*(_fetch_one(q) for q in queries[:2]))
@@ -147,6 +162,12 @@ async def render_pptx(slides: list[dict], theme_name: str = "minimal",
             await render(slide, s, theme, images or [])  # type: ignore[operator]
         else:
             render(slide, s, theme)  # type: ignore[operator]
+
+    # Log image embedding summary
+    slides_with_images = [i for i in image_futures]
+    logger.info("PPT render done: %d slides, %d with image queries, assets=%s",
+                 len(slides), len(slides_with_images),
+                 [(a.get("slide_index"), a.get("queries", [])[:1]) for a in assets])
 
     buf = io.BytesIO()
     prs.save(buf)
