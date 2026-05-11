@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Application
-    app_name: str = "Travel Advisor v2"
+    app_name: str = "Travel Advisor"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
 
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # LLM
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
-    llm_model: str = "deepseek-v4-pro"
+    llm_model: str = "deepseek-v4-flash"
     llm_max_tool_rounds: int = 5
 
     # Tavily Search

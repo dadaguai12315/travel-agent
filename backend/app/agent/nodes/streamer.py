@@ -22,7 +22,7 @@ async def run_streamer(state: AgentState) -> AgentState:
         state["final_response"] = state.get("draft_plan", "No plan generated.")
     elif intent == "chat":
         state["final_response"] = (
-            "你好！我是 Travel Advisor v2。\n\n"
+            "你好！我是 Travel Advisor。\n\n"
             "我可以帮你：\n"
             "- 规划详细的旅行行程\n"
             "- 根据预算推荐目的地\n"
