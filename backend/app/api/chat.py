@@ -6,6 +6,7 @@ Persists messages to PostgreSQL before and after the stream.
 """
 
 import json
+import logging
 import time
 
 from fastapi import APIRouter, Depends
@@ -20,6 +21,7 @@ from app.services.session_service import add_message as save_message
 from app.services.session_service import create_session, get_session
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 
 def _format_sse(event: str, data: dict) -> str:
@@ -71,6 +73,7 @@ async def chat_stream(
                 yield _format_sse(event_type, data)
 
         except Exception as e:
+            logger.exception("Chat stream failed for session %s", session_id)
             yield _format_sse("error", {"code": 500, "msg": str(e)})
 
         finally:
