@@ -13,6 +13,11 @@ from app.agent.state import AgentState
 from app.core.llm_client import chat_completion
 from app.ppt.renderer import render_pptx
 
+
+def _clean_json_response(content: str) -> str:
+    return content.strip().removeprefix("```json").removesuffix("```").strip()
+
+
 # ---- Agent 1: JSON Structurer ----
 STRUCTURER_PROMPT = """You are a travel data extraction engine. Convert the travel plan below into strict JSON.
 
@@ -44,13 +49,11 @@ Travel plan:
 
 
 async def structurer_node(state: AgentState) -> AgentState:
-    """Convert travel plan text → structured JSON."""
     plan = state.get("final_response", state.get("draft_plan", ""))
     response = await chat_completion([
         {"role": "user", "content": STRUCTURER_PROMPT.format(travel_plan=plan[:8000])}
     ])
-    content = response.get("content", "{}")
-    content = content.strip().removeprefix("```json").removesuffix("```").strip()
+    content = _clean_json_response(response.get("content", "{}"))
     try:
         state["travel_json"] = json.loads(content)
     except json.JSONDecodeError:
@@ -120,13 +123,11 @@ Travel data:
 
 
 async def slide_planner_node(state: AgentState) -> AgentState:
-    """Convert structured JSON → slide DSL."""
     travel_json = json.dumps(state.get("travel_json", {}), ensure_ascii=False)
     response = await chat_completion([
         {"role": "user", "content": SLIDE_PLANNER_PROMPT.format(travel_json=travel_json[:6000])}
     ])
-    content = response.get("content", "{}")
-    content = content.strip().removeprefix("```json").removesuffix("```").strip()
+    content = _clean_json_response(response.get("content", "{}"))
     try:
         slide_data = json.loads(content)
         state["slide_dsl"] = slide_data.get("slides", [])
@@ -153,7 +154,6 @@ Slides:
 
 
 async def visual_asset_node(state: AgentState) -> AgentState:
-    """Generate image search queries for each slide."""
     slides = state.get("slide_dsl", [])
     if not slides:
         state["visual_assets"] = []
@@ -163,8 +163,7 @@ async def visual_asset_node(state: AgentState) -> AgentState:
     response = await chat_completion([
         {"role": "user", "content": VISUAL_PROMPT.format(slides_json=slides_json)}
     ])
-    content = response.get("content", "{}")
-    content = content.strip().removeprefix("```json").removesuffix("```").strip()
+    content = _clean_json_response(response.get("content", "{}"))
     try:
         state["visual_assets"] = json.loads(content).get("assets", [])
     except json.JSONDecodeError:
@@ -175,9 +174,11 @@ async def visual_asset_node(state: AgentState) -> AgentState:
 # ---- Pipeline Orchestrator ----
 
 async def generate_pptx_stream(plan_text: str):
-    """Yield progress events during PPT generation."""
+    """Yield progress events during PPT generation. Yields final state as last event."""
+    state = _init_state(plan_text)
+
     yield {"type": "progress", "stage": "structurer", "msg": "正在解析旅行计划..."}
-    state = await structurer_node(_init_state(plan_text))
+    state = await structurer_node(state)
 
     yield {"type": "progress", "stage": "planner", "msg": "正在设计幻灯片布局..."}
     state = await slide_planner_node(state)
@@ -186,6 +187,7 @@ async def generate_pptx_stream(plan_text: str):
     state = await visual_asset_node(state)
 
     yield {"type": "progress", "stage": "render", "msg": "正在生成PPT文件..."}
+    yield {"type": "_pipeline_state", "state": state}
 
 
 def _init_state(plan_text: str) -> AgentState:
@@ -199,41 +201,30 @@ def _init_state(plan_text: str) -> AgentState:
     }
 
 
-async def generate_pptx(plan_text: str) -> bytes:
-    """Run the full pipeline: text → JSON → DSL → assets → PPTX.
+async def generate_pptx(plan_text: str, *, state: AgentState | None = None) -> bytes:
+    """Run the full pipeline and return .pptx bytes.
 
-    Returns the .pptx file as bytes.
+    If `state` is provided (from a prior stream), skips LLM nodes and renders directly.
     """
-    state: AgentState = {
-        "final_response": plan_text,
-        "travel_json": {},
-        "slide_dsl": [],
-        "slide_theme": "minimal",
-        "visual_assets": [],
-        "node_history": [],
-    }
+    if state is None:
+        state = _init_state(plan_text)
+        state = await structurer_node(state)
+        state = await slide_planner_node(state)
+        state = await visual_asset_node(state)
 
-    # Step 1: Structure
-    state = await structurer_node(state)
+    return await _render_from_state(state)
 
-    # Step 2: Slide DSL
-    state = await slide_planner_node(state)
 
-    # Step 3: Visual assets
-    state = await visual_asset_node(state)
-
-    # Step 4: Render PPTX
+async def _render_from_state(state: AgentState) -> bytes:
     slides = state.get("slide_dsl", [])
     theme = state.get("slide_theme", "minimal")
 
     if not slides:
-        # Fallback: minimal slides from travel JSON
         slides = _fallback_slides(state.get("travel_json", {}))
         theme = "minimal"
 
     assets = state.get("visual_assets", [])
-    pptx_bytes = await render_pptx(slides, theme, assets)
-    return pptx_bytes
+    return await render_pptx(slides, theme, assets)
 
 
 def _fallback_slides(travel_json: dict) -> list[dict]:

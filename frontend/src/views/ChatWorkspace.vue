@@ -17,6 +17,12 @@ const isDark = ref(localStorage.getItem('theme') === 'dark')
 const exportingPpt = ref(false)
 const pptProgress = ref('')
 const pptStage = ref('')
+const PPT_PROGRESS_WIDTH: Record<string, string> = {
+  structurer: '25%',
+  planner: '50%',
+  assets: '75%',
+  render: '90%',
+}
 
 async function exportPpt() {
   if (!activeSessionId.value || exportingPpt.value) return
@@ -24,10 +30,9 @@ async function exportPpt() {
   pptProgress.value = ''
   pptStage.value = ''
   try {
-    const token = localStorage.getItem('auth_token')
     const resp = await fetch(`/api/v1/ppt/generate?session_id=${activeSessionId.value}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${auth.token}` },
     })
     if (!resp.ok) throw new Error('Export failed')
 
@@ -57,7 +62,7 @@ async function exportPpt() {
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url; a.download = 'travel-plan.pptx'; a.click()
-            URL.revokeObjectURL(url)
+            setTimeout(() => URL.revokeObjectURL(url), 1000)
             pptProgress.value = ''
           } else if (data.type === 'error') {
             alert('导出失败: ' + data.msg)
@@ -179,7 +184,7 @@ onMounted(async () => {
           <div class="h-1 bg-gray-200 rounded-full overflow-hidden">
             <div
               class="h-full bg-accent rounded-full transition-all duration-500"
-              :style="{ width: pptStage === 'structurer' ? '25%' : pptStage === 'planner' ? '50%' : pptStage === 'assets' ? '75%' : '90%' }"
+              :style="{ width: PPT_PROGRESS_WIDTH[pptStage] || '90%' }"
             ></div>
           </div>
         </div>
