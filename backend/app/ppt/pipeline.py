@@ -226,16 +226,34 @@ async def generate_pptx(plan_text: str, *, state: AgentState | None = None) -> b
     return await _render_from_state(state)
 
 
+_THEME_MAP = {
+    "japan": {"bg": "F5F0E8", "accent": "9B1B30", "text": "2D2D2D", "sub": "8B7355"},
+    "minimal": {"bg": "FFFFFF", "accent": "111111", "text": "1A1A1A", "sub": "757575"},
+    "tropical": {"bg": "FFF8F0", "accent": "E8734A", "text": "2C3E50", "sub": "8E6E53"},
+    "ocean": {"bg": "F0F4F8", "accent": "1B4F72", "text": "1C2833", "sub": "5D6D7E"},
+    "editorial": {"bg": "FAFAFA", "accent": "2C3E50", "text": "1A1A1A", "sub": "7F8C8D"},
+    "nature": {"bg": "F4F6F0", "accent": "3E6B48", "text": "2D3436", "sub": "6B7F6B"},
+}
+
+
 async def _render_from_state(state: AgentState) -> bytes:
     slides = state.get("slide_dsl", [])
-    theme = state.get("slide_theme", "minimal")
+    theme_name = state.get("slide_theme", "minimal")
+    travel = state.get("travel_json", {})
 
     if not slides:
-        slides = _fallback_slides(state.get("travel_json", {}))
-        theme = "minimal"
+        slides = _fallback_slides(travel)
+        theme_name = "minimal"
 
+    theme = _THEME_MAP.get(theme_name, _THEME_MAP["minimal"])
     assets = state.get("visual_assets", [])
-    return await render_pptx(slides, theme, assets)
+
+    return await render_pptx(
+        slides, theme=theme, assets=assets,
+        title=travel.get("title", "Travel Plan"),
+        destination=travel.get("destination", ""),
+        duration=f"{travel.get('duration_days', 3)} days",
+    )
 
 
 def _fallback_slides(travel_json: dict) -> list[dict]:

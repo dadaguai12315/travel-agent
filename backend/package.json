@@ -1,0 +1,8 @@
+{
+  "name": "travel-agent-ppt",
+  "private": true,
+  "dependencies": {
+    "pptxgenjs": "^3.12.0",
+    "sharp": "^0.33.0"
+  }
+}
